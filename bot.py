@@ -1,8 +1,9 @@
-import os,logging,sqlite3
+import os,logging,re
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
+from telethon.tl.custom.button import Button
 from dotenv import load_dotenv
 from strings import strings,direct_reply
+from pymongo import MongoClient
 
 load_dotenv(override=True)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -10,28 +11,11 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-SUPER_ADMINS = os.getenv('SUPER_ADMINS', '').split(',')
-ADMINS = []
-CONN = sqlite3.connect('database.db')
+MONGODB_URL = os.getenv('MONGODB_URL')
+SUPER_ADMINS = [int(i) for i in os.getenv('SUPER_ADMINS', '0').split(',')]
+database = MongoClient(MONGODB_URL).post_bot
 bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-def db_get(key, default=None):
-    try:
-        cursor = CONN.cursor()
-        cursor.execute('SELECT value FROM key_values WHERE key=?', (key,))
-        return cursor.fetchone()[0]
-    except:
-        return default
-def db_put(key, value):
-    cursor = CONN.cursor()
-    cursor.execute('''
-CREATE TABLE IF NOT EXISTS key_values (
-    key INT PRIMARY KEY,
-    value TEXT
-)
-''')
-    cursor.execute('INSERT OR REPLACE INTO key_values (key, value) VALUES (?, ?)', (key, value))
-    CONN.commit()
  
 '''
 ==  Non processed handling  ==
@@ -40,12 +24,85 @@ see strings.py for default string values
 '''
 @bot.on(events.NewMessage(func=lambda e:e.is_private))
 async def handler(event):
-    if event.chat_id not in SUPER_ADMINS+ADMINS:
-        event.respond(strings['no_access'])
+    if event.chat_id not in SUPER_ADMINS and database.admins.find_one({'chat_id': event.chat_id}) is None:
+        await event.respond(strings['no_access'])
     elif event.message.text in direct_reply.keys():
-        event.respond(direct_reply[event.message.text])
+        await event.respond(direct_reply[event.message.text])
+    else:
+        return
     raise events.StopPropagation
 
 '''
 ==  Processed handling  ==
 '''
+# === COMMAND HANDLING (SUPER ADMINS ONLY) ===
+@bot.on(events.NewMessage(func=lambda e:e.is_private))
+async def handler(event):
+    if event.chat_id not in SUPER_ADMINS and database.admins.find_one({'chat_id': event.chat_id}) is None:
+        await event.respond(strings['no_access'])
+        return
+    command = event.message.text.split(' ')
+    if command[0]=='/add_admin':
+        if database.admins.find_one({'chat_id': int(command[1])}) is not None:
+            await event.respond(strings['admin_exists'])
+        elif len(command)==3:
+            database.admins.insert_one({'chat_id': int(command[1]),'nick': command[2]})
+            await event.respond(strings['new_admin_added'])
+        else:
+            await event.respond(strings['invalid_syntax'])
+    
+    elif command[0]=='/remove_admin':
+        if database.admins.find_one({'chat_id': int(command[1])}) is not None:
+            database.admins.delete_one({'chat_id': int(command[1])})
+            await event.respond(strings['admin_removed'])
+        else:
+            await event.respond(strings['admin_404'])
+    
+    elif command[0]=='/admins':
+        admin_list = [f"{a['nick']}: `{a['chat_id']}`" for a in database.admins.find()]
+        await event.respond(strings['admin_list_title']+"\n".join(admin_list))
+    
+    elif command[0]=='/add_chat':
+        if database.my_chats.find_one({'chat_id': command[1]}) is not None:
+            await event.respond(strings['chat_already_added'])
+        elif len(command)==3:
+            database.my_chats.insert_one({'chat_id': int(command[1]),'nick': command[2]})
+            await event.respond(strings['new_chat_added'])
+        else:
+            await event.respond(strings['invalid_syntax'])
+
+    elif command[0]=='/remove_chat':
+        if database.my_chats.find_one({'chat_id': int(command[1])}) is not None:
+            database.my_chats.delete_one({'chat_id': int(command[1])})
+            database.chat_posts.delete_many({'chat_id': int(command[1])})
+            await event.respond(strings['chat_removed'])
+        else:
+            await event.respond(strings['chat_404'])
+    
+    elif command[0]=='/chats':
+        chat_list = [f"{a['nick']}: `{a['chat_id']}`" for a in database.my_chats.find()]
+        await event.respond(strings['chat_list_title']+"\n".join(chat_list))
+
+    else:
+        return
+    raise events.StopPropagation
+
+# === COMMAND HANDLING (ALL) ===
+@bot.on(events.NewMessage(func=lambda e:e.is_private))
+async def handler(event):
+    m = re.search(r"^https?://t\.me/c/(\d+)/(\d+)$", event.message.text)
+    if m:
+        chatId = int('-100'+m[1])
+        messageId = int(m[2])
+        post = database.chat_posts.find_one({
+            'chat_id': chatId,
+            'message_id': messageId
+        })
+        if post is None:
+            await event.respond(strings['post_404'])
+        else:
+            buttons = [Button.inline(strings['add_btn'], f'+btn.{chatId}.{messageId}')]
+            await event.respond(post['text'], buttons=buttons)
+
+with bot:
+    bot.run_until_disconnected()
