@@ -32,10 +32,20 @@ CREATE TABLE IF NOT EXISTS key_values (
 ''')
     cursor.execute('INSERT OR REPLACE INTO key_values (key, value) VALUES (?, ?)', (key, value))
     CONN.commit()
-
+ 
+'''
+==  Non processed handling  ==
+this section contain the direct responses and access checking part
+see strings.py for default string values
+'''
 @bot.on(events.NewMessage(func=lambda e:e.is_private))
 async def handler(event):
-    global ADMINS
     if event.chat_id not in SUPER_ADMINS+ADMINS:
         event.respond(strings['no_access'])
-        raise events.StopPropagation
+    elif event.message.text in direct_reply.keys():
+        event.respond(direct_reply[event.message.text])
+    raise events.StopPropagation
+
+'''
+==  Processed handling  ==
+'''
