@@ -1,9 +1,10 @@
-import os,logging,json
+import os,logging,json,requests,urllib.parse
 from telethon import TelegramClient, events
 from telethon.tl.custom.button import Button
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
+from datetime import datetime, timedelta
 
 load_dotenv(override=True)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -12,16 +13,36 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGODB_URL = os.getenv('MONGODB_URL')
+TIME_ZONE = os.getenv('TIME_ZONE')
+CRONJOB_TOKEN = os.getenv('CRONJOB_TOKEN')
 database = MongoClient(MONGODB_URL).post_bot
 bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-buttons_post_mgr = [
-    [Button.text('👁‍🗨 Preview', resize=True), Button.text('⚙️ Options', resize=True), Button.text('Get Buttons', resize=True), Button.text('📝 Edit Content', resize=True), ],
-    [Button.text('Cancel', resize=True), Button.text('☑️ Done', resize=True), ],
-]
 buttons_main = [
     [Button.text('📌 Create post', resize=True), Button.text('📝Edit Post', resize=True), ]
 ]
 
+async def set_edit_kbd(msg):
+    buttons_post_mgr = [
+        [Button.text('👁‍🗨 Preview', resize=True), Button.text('⚙️ Options', resize=True), Button.text('Get Buttons', resize=True), Button.text('📝 Edit Content', resize=True), ],
+        [Button.text('Cancel', resize=True), Button.text('☑️ Done', resize=True), ],
+    ]
+    await msg.reply('''This is a preview of how your message would look like.
+you can edit parse_mode and webpage preview by clicking on Options
+to add inline buttons, click on the ➕ key on the row you want to add a button.
+to delete inline buttons click on the button you want to remove.
+to preview the message (without the extra ➕ buttons) click on preview.
+when you finished editing, press Done to receive the `post number`.''', buttons=buttons_post_mgr)
+def timedelta_to_next_occurrence(target_time):
+    target_hour, target_minute, target_second = map(int, target_time.split(':'))
+    current_time = datetime.now().time()
+    current_datetime = datetime.combine(datetime.now().date(), current_time)
+    next_day_datetime = datetime.now() + timedelta(days=1)
+    target_datetime_today = current_datetime.replace(hour=target_hour, minute=target_minute, second=target_second)
+    target_datetime_tomorrow = datetime.combine(next_day_datetime.date(), datetime.min.time()).replace(hour=target_hour, minute=target_minute, second=target_second)
+    if current_datetime > target_datetime_today:
+        return target_datetime_tomorrow - current_datetime
+    else:
+        return target_datetime_today - current_datetime
 def option_kbd(parse=0, web=0):
     if parse in [None, 'md', 'HTML']:
         parse = [None, 'md', 'HTML'].index(parse)
@@ -66,7 +87,7 @@ def inlinefy(data, prefix, level=0):
     elif type(data)==dict:
         return Button.inline(data['text'], prefix)
 
-@bot.on(events.NewMessage(func=lambda e:e.is_private))
+@bot.on(events.NewMessage(func=lambda e:e.is_private, outgoing=False))
 async def handler(event):
     user = database.users.find_one({'chat_id': event.chat_id})
     if user is None:
@@ -116,7 +137,7 @@ if you want to send the post to your channel without inline mode you need to get
             media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
         else:
             media = None
-        if event.message.text!='' or event.message.text is not None:
+        if event.message.text is not None or event.message.text!='':
             data['text'] = event.message.text
         if user.get('post_id', None) is not None:
             database.posts.update_one({'_id': data['_id']}, {"$set": data})
@@ -125,12 +146,23 @@ if you want to send the post to your channel without inline mode you need to get
             database.users.update_one({'_id': user['_id']}, {"$set": user})
         buttons = inlinefy([] if 'buttons' not in data else data['buttons'], user['post_id'])
         msg = await event.respond(data['text'], file=media, buttons=buttons, parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-        await msg.reply('''This is a preview of how your message would look like.
-you can edit parse_mode and webpage preview by clicking on Options
-to add inline buttons, click on the ➕ key on the row you want to add a button.
-to delete inline buttons click on the button you want to remove.
-to preview the message (without the extra ➕ buttons) click on preview.
-when you finished editing, press Done to receive the `post number`.''', buttons=buttons_post_mgr)
+        await set_edit_kbd(msg)
+
+    elif user['next'] =='edit_post':
+        data = database.posts.find_one({'_id': ObjectId(event.message.text), 'chat_id': event.chat_id})
+        if data is not None:
+            user['post_id'] = event.message.text
+            user['next'] = None
+            database.users.update_one({'_id': user['_id']}, {"$set": user})
+            if 'media' in data:
+                media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
+            else:
+                media = None
+            buttons = inlinefy([] if 'buttons' not in data else data['buttons'], user['post_id'])
+            msg = await event.respond(data['text'], file=media, buttons=buttons, parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+            await set_edit_kbd(msg)
+        else:
+            await event.respond("Post not found.", buttons=Button.clear())
 
     elif user['next'] == 'add_btn_text':
         user['btn_data']['text'] = event.message.text
@@ -146,7 +178,8 @@ when you finished editing, press Done to receive the `post number`.''', buttons=
         if len(user['btn_data']['address'])==1:
             b_list.append([{'text': user['btn_data']['text'], 'url': event.message.text}])
         else:
-            if 0 <= user['btn_data']['address'][1] < len(b_list[user['btn_data']['address'][0]]):
+            print(user)
+            if type(user['btn_data']['address'][1])==int and 0 <= user['btn_data']['address'][1] < len(b_list[user['btn_data']['address'][0]]):
                 b_list[user['btn_data']['address'][0]][user['btn_data']['address'][1]] = {'text': user['btn_data']['text'], 'url': event.message.text}
             else:
                 b_list[user['btn_data']['address'][0]].append({'text': user['btn_data']['text'], 'url': event.message.text})
@@ -157,12 +190,7 @@ when you finished editing, press Done to receive the `post number`.''', buttons=
         else:
             media = None
         msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-        await msg.reply('''This is a preview of how your message would look like.
-you can edit parse_mode and webpage preview by clicking on Options
-to add inline buttons, click on the ➕ key on the row you want to add a button.
-to delete inline buttons click on the button you want to remove.
-to preview the message (without the extra ➕ buttons) click on preview.
-when you finished editing, press Done to receive the `post number`.''', buttons=buttons_post_mgr)
+        await set_edit_kbd(msg)
     
     elif user['next'] == 'del_btn':
         data = database.posts.find_one({'_id': ObjectId(user['post_id'])})
@@ -177,12 +205,7 @@ when you finished editing, press Done to receive the `post number`.''', buttons=
                 data['buttons'] = b_list
                 database.posts.update_one({'_id': data['_id']}, {"$set": data})
             msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-            await msg.reply('''This is a preview of how your message would look like.
-    you can edit parse_mode and webpage preview by clicking on Options
-    to add inline buttons, click on the ➕ key on the row you want to add a button.
-    to delete inline buttons click on the button you want to remove.
-    to preview the message (without the extra ➕ buttons) click on preview.
-    when you finished editing, press Done to receive the `post number`.''', buttons=buttons_post_mgr)
+            await set_edit_kbd(msg)
         elif event.message.text == '📝 Edit':
             user['next'] = 'add_btn_text'
             database.users.update_one({'_id': user['_id']}, {"$set": user})
@@ -198,12 +221,7 @@ when you finished editing, press Done to receive the `post number`.''', buttons=
                 media = None
             if event.message.text == '🔙':
                 msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-                await msg.reply('''This is a preview of how your message would look like.
-    you can edit parse_mode and webpage preview by clicking on Options
-    to add inline buttons, click on the ➕ key on the row you want to add a button.
-    to delete inline buttons click on the button you want to remove.
-    to preview the message (without the extra ➕ buttons) click on preview.
-    when you finished editing, press Done to receive the `post number`.''', buttons=buttons_post_mgr)
+                await set_edit_kbd(msg)
             else:
                 await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
         elif event.message.text == '⚙️ Options':
@@ -230,10 +248,81 @@ if you want to send the post to your channel without inline mode you need to get
             buttons = [
                 [Button.text('📌 Create another post', resize=True), Button.text('🔙', resize=True)]
             ]
-            await event.respond(f'''☑️ Post has been saved. your post number is: 42298
+            await event.respond(f'''☑️ Post has been saved. your post number is: {user['post_id_back']}
 to send it via inline mode use:
 
 `@{me.username} {user['post_id_back']}`''', buttons=buttons)
+            
+    elif event.message.text.startswith('/schedule'):
+        inp = event.message.text.split(' ')
+        if len(inp) != 4:
+            await event.respond('Invalid syntax\nsyntax:\n`/schedule post_id chat_id HH:MM:SS`\nHH:MM:SS is in 24 hour format')
+            return
+        data = database.posts.find_one({'_id': ObjectId(inp[1])})
+        if data is None:
+            await event.respond('post not found')
+            return
+        try:
+            await bot.send_message(int(inp[2]), event.message.text, schedule=timedelta_to_next_occurrence(inp[3]))
+            result = database.schedules.insert_one({'chat_id': event.chat_id, 'post_id': inp[1], 'target_chat_id': inp[3], 'time': inp[3]})
+            await event.respond(f'''schedule created successfully!
+Schedule ID: `{result.inserted_id}`
+
+to stop the schedule:
+`/stop {result.inserted_id}`''', buttons=Button.clear())
+        except KeyboardInterrupt as e:
+            await event.respond(repr(e))
+
+    elif event.message.text.startswith('/stop'):
+        inp = event.message.text.split(' ', 1)
+        if len(inp)!= 2:
+            await event.respond('invalid syntax\n\nsyntax: `/stop schedule_id`')
+            return
+        schedule = database.schedules.find_one({'_id': ObjectId(inp[1]), 'chat_id': event.chat_id})
+        if schedule is None:
+            await event.respond('schedule not found')
+            return
+        user['next'] = 'stop_schedule'
+        user['stop_schedule'] = inp[1]
+        database.users.update_one({'_id': user['_id']}, {"$set": user})
+        buttons = [
+            [Button.text('Yes', resize=True), Button.text('No', resize=True)]
+        ]
+        await event.respond(f'Are you sure you want to delete schedule {inp[1]} ?', buttons=buttons)
+
+    elif user['next'] == 'stop_schedule':
+        if event.message.text == 'Yes':
+            schedule = database.schedules.find_one({'_id': ObjectId(user['stop_schedule']), 'chat_id': event.chat_id})
+            if schedule is None:
+                await event.respond('schedule not found', buttons=Button.clear())
+            else:
+                database.schedules.delete_one({'_id': ObjectId(user['stop_schedule']), 'chat_id': event.chat_id})
+                await event.respond('schedule deleted', buttons=Button.clear())
+        elif event.message.text == 'No':
+            await event.respond('cancelled', buttons=Button.clear())
+        else:
+            await event.respond('invalid option')
+        user['next'] = None
+        database.users.update_one({'_id': user['_id']}, {"$set": user})
+
+@bot.on(events.NewMessage(outgoing=True))
+async def handler(event):
+    if event.message.text.startswith('/schedule'):
+        inp = event.message.text.split(' ')
+        if len(inp) != 4:
+            return
+        data = database.posts.find_one({'_id': ObjectId(inp[1])})
+        if data is None:
+            return
+        b_list = [] if 'buttons' not in data else data['buttons']
+        user = database.users.find_one({'chat_id': data['chat_id']})
+        if 'media' in data:
+            media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
+        else:
+            media = None
+        await event.delete()
+        await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+        await bot.send_message(event.chat_id, event.message.text, schedule=timedelta_to_next_occurrence(inp[3]))
 
 @bot.on(events.CallbackQuery(func=lambda e:e.is_private))
 async def handler(event):
@@ -285,6 +374,8 @@ async def handler(event):
 @bot.on(events.InlineQuery)
 async def handler(event):
     #print(await event.get_sender())
+    if event.text is None or event.text == '':
+        return
     data = database.posts.find_one({'_id': ObjectId(event.text)})
     user = database.users.find_one({'chat_id': data['chat_id']})
     if data is None:
@@ -303,5 +394,26 @@ async def handler(event):
             link_preview=user['link_preview'],
         )
     ])
+
+# Event handler for new members joining the group
+@bot.on(events.ChatAction(func=lambda event: event.user_joined))
+async def welcome(event):
+    # Get the chat ID
+    
+    chat_id = event.chat_id
+    new_member = event.user.first_name
+    databasewl = database.welcome
+    last_welcome_msg_id = databasewl.find_one({'chat_id': chat_id})
+    if last_welcome_msg_id:
+        try:
+            await bot.delete_messages(chat_id, last_welcome_msg_id['message_id'])
+            print("Last welcome message deleted.")
+        except Exception as e:
+            print("Error deleting message:", e)
+    WELCOME_MESSAGE = f"Hello {new_member},\nWelcome to Setrade Asia Group! Click the button below to visit SETrade Asia."
+    BUTTON_URL = "https://setrade.asia"
+    welcome_msg = await event.respond(WELCOME_MESSAGE, buttons=[[Button.url("Visit SETrade Asia", BUTTON_URL)]])
+    databasewl.update_one({'chat_id': chat_id}, {'$set': {'message_id': welcome_msg.id}}, upsert=True)
+
 with bot:
     bot.run_until_disconnected()
