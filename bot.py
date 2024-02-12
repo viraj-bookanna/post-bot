@@ -43,6 +43,45 @@ def timedelta_to_next_occurrence(target_time):
         return target_datetime_tomorrow - current_datetime
     else:
         return target_datetime_today - current_datetime
+def encode_body(body_dict):
+    encoded = []
+    for item in body_dict:
+        encoded.append('{}={}'.format(urllib.parse.quote(item), urllib.parse.quote(body_dict[item])))
+    return '&'.join(encoded)
+def create_shedule(timeTuple, body):
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer zaX78aqKJuIH4l4RX6njoqADn77MQNJJ',
+    }
+    json_data = {
+        'job': {
+            'url': f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
+            'enabled': 'true',
+            'saveResponses': True,
+            "extendedData": {
+                "headers": {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                "body": encode_body(body)
+            },
+            'schedule': {
+                'timezone': TIME_ZONE,
+                'expiresAt': 0,
+                'hours': [timeTuple[0],],
+                'mdays': [-1,],
+                'minutes': [timeTuple[1],],
+                'months': [-1,],
+                'wdays': [-1,],
+            },
+        },
+    }
+    return requests.put('https://api.cron-job.org/jobs', headers=headers, json=json_data).json()["jobId"]
+def delete_shedule(job_id):
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer zaX78aqKJuIH4l4RX6njoqADn77MQNJJ',
+    }
+    return requests.delete(f'https://api.cron-job.org/jobs/{job_id}', headers=headers).status_code
 def option_kbd(parse=0, web=0):
     if parse in [None, 'md', 'HTML']:
         parse = [None, 'md', 'HTML'].index(parse)
