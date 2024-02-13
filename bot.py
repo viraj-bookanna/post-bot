@@ -70,7 +70,7 @@ async def cron():
         await wait_until_next_minute()
         print('executing cron')
         for job in get_jobs_for_current_minute():
-            print(job, datetime.now(), datetime.now(TIMEZONE))
+            print(job, datetime.now(TIMEZONE))
             await execute_job(job)
 async def set_edit_kbd(msg):
     buttons_post_mgr = [
@@ -250,7 +250,6 @@ if you want to send the post to your channel without inline mode you need to get
         skiplist = [
             telethon.tl.types.MessageMediaWebPage,
         ]
-        print(data)
         if event.message.media is not None and type(event.message.media) not in skiplist:
             data['media'] = event.message.id
             media = event.message.media
@@ -259,7 +258,6 @@ if you want to send the post to your channel without inline mode you need to get
             media = media if type(event.message.media) not in skiplist else None
         else:
             media = None
-        print(media)
         if event.message.text is not None or event.message.text!='':
             data['text'] = event.message.text
         if user.get('post_id', None) is not None:
@@ -305,7 +303,6 @@ if you want to send the post to your channel without inline mode you need to get
         if len(user['btn_data']['address'])==1:
             b_list.append([{'text': user['btn_data']['text'], 'url': urls[0]}])
         else:
-            print(user)
             if type(user['btn_data']['address'][1])==int and 0 <= user['btn_data']['address'][1] < len(b_list[user['btn_data']['address'][0]]):
                 b_list[user['btn_data']['address'][0]][user['btn_data']['address'][1]] = {'text': user['btn_data']['text'], 'url': event.message.text}
             else:
@@ -406,7 +403,6 @@ async def handler(event):
 
 @bot.on(events.InlineQuery)
 async def handler(event):
-    #print(await event.get_sender())
     if event.text is None or event.text == '':
         return
     data = database.posts.find_one({'_id': ObjectId(event.text)})
