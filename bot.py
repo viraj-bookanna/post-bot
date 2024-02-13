@@ -1,4 +1,4 @@
-import os,logging,json,asyncio,time,pytz
+import os,logging,json,asyncio,pytz,telethon
 from telethon import TelegramClient, events
 from telethon.tl.custom.button import Button
 from dotenv import load_dotenv
@@ -230,13 +230,19 @@ if you want to send the post to your channel without inline mode you need to get
             data = {
                 'chat_id': event.chat_id,
             }
-        if event.message.media is not None:
+        skiplist = [
+            telethon.tl.types.MessageMediaWebPage,
+        ]
+        print(data)
+        if event.message.media is not None and type(event.message.media) not in skiplist:
             data['media'] = event.message.id
             media = event.message.media
         elif 'media' in data:
             media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
+            media = media if type(event.message.media) not in skiplist else None
         else:
             media = None
+        print(media)
         if event.message.text is not None or event.message.text!='':
             data['text'] = event.message.text
         if user.get('post_id', None) is not None:
