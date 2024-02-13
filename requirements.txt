@@ -1,3 +1,5 @@
 telethon
 python-dotenv
 pymongo[srv]
+asyncio
+pytz

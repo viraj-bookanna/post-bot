@@ -1,10 +1,10 @@
-import os,logging,json,requests,urllib.parse
+import os,logging,json,asyncio,time,pytz
 from telethon import TelegramClient, events
 from telethon.tl.custom.button import Button
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
-from datetime import datetime, timedelta
+from datetime import datetime
 
 load_dotenv(override=True)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -13,14 +13,51 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGODB_URL = os.getenv('MONGODB_URL')
-TIME_ZONE = os.getenv('TIME_ZONE')
-CRONJOB_TOKEN = os.getenv('CRONJOB_TOKEN')
+TIMEZONE = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Colombo'))
 database = MongoClient(MONGODB_URL).post_bot
 bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 buttons_main = [
     [Button.text('📌 Create post', resize=True), Button.text('📝Edit Post', resize=True), ]
 ]
 
+async def wait_until_next_minute():
+    now = datetime.now(TIMEZONE)
+    next_minute = now.replace(hour=now.hour, minute=now.minute+1, second=0, microsecond=0)
+    seconds_to_next_minute = (next_minute-now).total_seconds()
+    await asyncio.sleep(seconds_to_next_minute)
+def get_jobs_for_current_minute():
+    now = datetime.now(TIMEZONE)
+    minutes_passed = now.minute + now.hour * 60
+    tasks = database.cron.find({"execution_time": minutes_passed})
+    return tasks
+def add_job(job_data, execution_time):
+    hour, minute = map(int, execution_time.split(':'))
+    custom_now = datetime.now(TIMEZONE).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    job_data['execution_time'] = custom_now.minute + custom_now.hour * 60
+    return database.cron.insert_one(job_data)
+async def execute_job(job):
+    data = database.posts.find_one({'_id': ObjectId(job['post_id'])})
+    if data is None:
+        return
+    b_list = [] if 'buttons' not in data else data['buttons']
+    user = database.users.find_one({'chat_id': data['chat_id']})
+    if 'media' in data:
+        media = (await bot.get_messages(data['chat_id'], ids=data['media'])).media
+    else:
+        media = None
+    try:
+        await bot.send_message(job['target_chat_id'], data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+    except KeyboardInterrupt as e:
+        raise e
+    except Exception as e:
+        print(repr(e))
+async def cron():
+    while True:
+        await wait_until_next_minute()
+        print('executing cron')
+        for job in get_jobs_for_current_minute():
+            print(job, datetime.now(), datetime.now(TIMEZONE))
+            await execute_job(job)
 async def set_edit_kbd(msg):
     buttons_post_mgr = [
         [Button.text('👁‍🗨 Preview', resize=True), Button.text('⚙️ Options', resize=True), Button.text('Get Buttons', resize=True), Button.text('📝 Edit Content', resize=True), ],
@@ -32,56 +69,6 @@ to add inline buttons, click on the ➕ key on the row you want to add a button.
 to delete inline buttons click on the button you want to remove.
 to preview the message (without the extra ➕ buttons) click on preview.
 when you finished editing, press Done to receive the `post number`.''', buttons=buttons_post_mgr)
-def timedelta_to_next_occurrence(target_time):
-    target_hour, target_minute, target_second = map(int, target_time.split(':'))
-    current_time = datetime.now().time()
-    current_datetime = datetime.combine(datetime.now().date(), current_time)
-    next_day_datetime = datetime.now() + timedelta(days=1)
-    target_datetime_today = current_datetime.replace(hour=target_hour, minute=target_minute, second=target_second)
-    target_datetime_tomorrow = datetime.combine(next_day_datetime.date(), datetime.min.time()).replace(hour=target_hour, minute=target_minute, second=target_second)
-    if current_datetime > target_datetime_today:
-        return target_datetime_tomorrow - current_datetime
-    else:
-        return target_datetime_today - current_datetime
-def encode_body(body_dict):
-    encoded = []
-    for item in body_dict:
-        encoded.append('{}={}'.format(urllib.parse.quote(item), urllib.parse.quote(body_dict[item])))
-    return '&'.join(encoded)
-def create_shedule(timeTuple, body):
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer zaX78aqKJuIH4l4RX6njoqADn77MQNJJ',
-    }
-    json_data = {
-        'job': {
-            'url': f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage',
-            'enabled': 'true',
-            'saveResponses': True,
-            "extendedData": {
-                "headers": {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                "body": encode_body(body)
-            },
-            'schedule': {
-                'timezone': TIME_ZONE,
-                'expiresAt': 0,
-                'hours': [timeTuple[0],],
-                'mdays': [-1,],
-                'minutes': [timeTuple[1],],
-                'months': [-1,],
-                'wdays': [-1,],
-            },
-        },
-    }
-    return requests.put('https://api.cron-job.org/jobs', headers=headers, json=json_data).json()["jobId"]
-def delete_shedule(job_id):
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer zaX78aqKJuIH4l4RX6njoqADn77MQNJJ',
-    }
-    return requests.delete(f'https://api.cron-job.org/jobs/{job_id}', headers=headers).status_code
 def option_kbd(parse=0, web=0):
     if parse in [None, 'md', 'HTML']:
         parse = [None, 'md', 'HTML'].index(parse)
@@ -287,37 +274,32 @@ if you want to send the post to your channel without inline mode you need to get
             buttons = [
                 [Button.text('📌 Create another post', resize=True), Button.text('🔙', resize=True)]
             ]
-            await event.respond(f'''☑️ Post has been saved. your post number is: {user['post_id_back']}
-to send it via inline mode use:
-
-`@{me.username} {user['post_id_back']}`''', buttons=buttons)
+            await event.respond(f'''☑️ Post has been saved. your post number is: {user['post_id_back']}\nto send it via inline mode use:\n\n`@{me.username} {user['post_id_back']}`''', buttons=buttons)
             
     elif event.message.text.startswith('/schedule'):
         inp = event.message.text.split(' ')
         if len(inp) != 4:
-            await event.respond('Invalid syntax\nsyntax:\n`/schedule post_id chat_id HH:MM:SS`\nHH:MM:SS is in 24 hour format')
+            await event.respond('Invalid syntax\nsyntax:\n`/schedule post_id target_chat_id HH:MM`\nHH:MM is in 24 hour format')
             return
         data = database.posts.find_one({'_id': ObjectId(inp[1])})
         if data is None:
             await event.respond('post not found')
             return
-        try:
-            await bot.send_message(int(inp[2]), event.message.text, schedule=timedelta_to_next_occurrence(inp[3]))
-            result = database.schedules.insert_one({'chat_id': event.chat_id, 'post_id': inp[1], 'target_chat_id': inp[3], 'time': inp[3]})
-            await event.respond(f'''schedule created successfully!
-Schedule ID: `{result.inserted_id}`
-
-to stop the schedule:
-`/stop {result.inserted_id}`''', buttons=Button.clear())
-        except KeyboardInterrupt as e:
-            await event.respond(repr(e))
+        job_data = {
+            'chat_id': event.chat_id,
+            'post_id': inp[1],
+            'target_chat_id': int(inp[2]),
+            'time': inp[3]
+        }
+        result = add_job(job_data, inp[3])
+        await event.respond(f'''schedule created successfully!\nSchedule ID: `{result.inserted_id}`\n\nto stop the schedule:\n`/stop {result.inserted_id}`''', buttons=Button.clear())
 
     elif event.message.text.startswith('/stop'):
         inp = event.message.text.split(' ', 1)
         if len(inp)!= 2:
             await event.respond('invalid syntax\n\nsyntax: `/stop schedule_id`')
             return
-        schedule = database.schedules.find_one({'_id': ObjectId(inp[1]), 'chat_id': event.chat_id})
+        schedule = database.cron.find_one({'_id': ObjectId(inp[1]), 'chat_id': event.chat_id})
         if schedule is None:
             await event.respond('schedule not found')
             return
@@ -331,37 +313,19 @@ to stop the schedule:
 
     elif user['next'] == 'stop_schedule':
         if event.message.text == 'Yes':
-            schedule = database.schedules.find_one({'_id': ObjectId(user['stop_schedule']), 'chat_id': event.chat_id})
+            schedule = database.cron.find_one({'_id': ObjectId(user['stop_schedule']), 'chat_id': event.chat_id})
             if schedule is None:
                 await event.respond('schedule not found', buttons=Button.clear())
             else:
-                database.schedules.delete_one({'_id': ObjectId(user['stop_schedule']), 'chat_id': event.chat_id})
+                database.cron.delete_one({'_id': ObjectId(user['stop_schedule']), 'chat_id': event.chat_id})
                 await event.respond('schedule deleted', buttons=Button.clear())
         elif event.message.text == 'No':
             await event.respond('cancelled', buttons=Button.clear())
         else:
             await event.respond('invalid option')
+            return
         user['next'] = None
         database.users.update_one({'_id': user['_id']}, {"$set": user})
-
-@bot.on(events.NewMessage(outgoing=True))
-async def handler(event):
-    if event.message.text.startswith('/schedule'):
-        inp = event.message.text.split(' ')
-        if len(inp) != 4:
-            return
-        data = database.posts.find_one({'_id': ObjectId(inp[1])})
-        if data is None:
-            return
-        b_list = [] if 'buttons' not in data else data['buttons']
-        user = database.users.find_one({'chat_id': data['chat_id']})
-        if 'media' in data:
-            media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
-        else:
-            media = None
-        await event.delete()
-        await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-        await bot.send_message(event.chat_id, event.message.text, schedule=timedelta_to_next_occurrence(inp[3]))
 
 @bot.on(events.CallbackQuery(func=lambda e:e.is_private))
 async def handler(event):
@@ -455,4 +419,5 @@ async def welcome(event):
     databasewl.update_one({'chat_id': chat_id}, {'$set': {'message_id': welcome_msg.id}}, upsert=True)
 
 with bot:
+    bot.loop.create_task(cron())
     bot.run_until_disconnected()
