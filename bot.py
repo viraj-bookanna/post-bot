@@ -138,7 +138,7 @@ if you want to send the post to your channel without inline mode you need to get
     elif event.message.text == '/help':
         await event.respond('press /start', buttons=Button.clear())
     
-    elif event.message.text in ['📌 Create post', '📌 Create another post']:
+    elif event.message.text in ['📌 Create post', '📌 Create another post', '/new']:
         user['next'] = 'create_post'
         user['post_id'] = None
         database.users.update_one({'_id': user['_id']}, {"$set": user})
@@ -148,6 +148,80 @@ if you want to send the post to your channel without inline mode you need to get
         user['next'] = 'edit_post'
         database.users.update_one({'_id': user['_id']}, {"$set": user})
         await event.respond("Enter the post number that you want to edit. Ex: 1", buttons=Button.clear())
+
+    elif event.message.text in ['🔙', '👁‍🗨 Preview','⚙️ Options','Get Buttons','📝 Edit Content','Cancel','☑️ Done'] and user.get('post_id', None) is not None:
+        data = database.posts.find_one({'_id': ObjectId(user['post_id'])})
+        b_list = [] if 'buttons' not in data else data['buttons']
+        if event.message.text in ['🔙', '👁‍🗨 Preview']:
+            if 'media' in data:
+                media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
+            else:
+                media = None
+            if event.message.text == '🔙':
+                msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+                await set_edit_kbd(msg)
+            else:
+                await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+        elif event.message.text == '⚙️ Options':
+            await event.respond('Click on the desired option to select it.', buttons=option_kbd(user['parse_mode'], user['link_preview']))
+        elif event.message.text == 'Get Buttons':
+            await event.respond(json.dumps(b_list, indent=4))
+        elif event.message.text == '📝 Edit Content':
+            user['next'] = 'create_post'
+            database.users.update_one({'_id': user['_id']}, {"$set": user})
+            await event.respond('Enter new content for the post', buttons=Button.clear())
+        elif event.message.text == 'Cancel':
+            database.posts.delete_one({'_id': ObjectId(user['post_id'])})
+            user['post_id'] = None
+            database.users.update_one({'_id': user['_id']}, {"$set": user})
+            await event.respond('''Welcome 🌺
+using this bot you can create cool posts with buttons, markdown text, HTML text, and embedded links.
+then you can send it anywhere you want using inline mode
+if you want to send the post to your channel without inline mode you need to get your own instance of this bot.''', buttons=buttons_main)
+        elif event.message.text == '☑️ Done':
+            me = await bot.get_me()
+            user['post_id_back'] = user['post_id']
+            user['post_id'] = None
+            database.users.update_one({'_id': user['_id']}, {"$set": user})
+            buttons = [
+                [Button.text('📌 Create another post', resize=True), Button.text('🔙', resize=True)]
+            ]
+            await event.respond(f'''☑️ Post has been saved. your post number is: {user['post_id_back']}\nto send it via inline mode use:\n\n`@{me.username} {user['post_id_back']}`''', buttons=buttons)
+            
+    elif event.message.text.startswith('/schedule'):
+        inp = event.message.text.split(' ')
+        if len(inp) != 4:
+            await event.respond('Invalid syntax\nsyntax:\n`/schedule post_id target_chat_id HH:MM`\nHH:MM is in 24 hour format')
+            return
+        data = database.posts.find_one({'_id': ObjectId(inp[1])})
+        if data is None:
+            await event.respond('post not found')
+            return
+        job_data = {
+            'chat_id': event.chat_id,
+            'post_id': inp[1],
+            'target_chat_id': int(inp[2]),
+            'time': inp[3]
+        }
+        result = add_job(job_data, inp[3])
+        await event.respond(f'''schedule created successfully!\nSchedule ID: `{result.inserted_id}`\n\nto stop the schedule:\n`/stop {result.inserted_id}`''', buttons=Button.clear())
+
+    elif event.message.text.startswith('/stop'):
+        inp = event.message.text.split(' ', 1)
+        if len(inp)!= 2:
+            await event.respond('invalid syntax\n\nsyntax: `/stop schedule_id`')
+            return
+        schedule = database.cron.find_one({'_id': ObjectId(inp[1]), 'chat_id': event.chat_id})
+        if schedule is None:
+            await event.respond('schedule not found')
+            return
+        user['next'] = 'stop_schedule'
+        user['stop_schedule'] = inp[1]
+        database.users.update_one({'_id': user['_id']}, {"$set": user})
+        buttons = [
+            [Button.text('Yes', resize=True), Button.text('No', resize=True)]
+        ]
+        await event.respond(f'Are you sure you want to delete schedule {inp[1]} ?', buttons=buttons)
 
     elif user['next'] == 'create_post':
         if user.get('post_id', None) is not None:
@@ -236,80 +310,6 @@ if you want to send the post to your channel without inline mode you need to get
             user['next'] = 'add_btn_text'
             database.users.update_one({'_id': user['_id']}, {"$set": user})
             await event.respond('Please send text for button:', buttons=Button.clear())
-
-    elif event.message.text in ['🔙', '👁‍🗨 Preview','⚙️ Options','Get Buttons','📝 Edit Content','Cancel','☑️ Done'] and user.get('post_id', None) is not None:
-        data = database.posts.find_one({'_id': ObjectId(user['post_id'])})
-        b_list = [] if 'buttons' not in data else data['buttons']
-        if event.message.text in ['🔙', '👁‍🗨 Preview']:
-            if 'media' in data:
-                media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
-            else:
-                media = None
-            if event.message.text == '🔙':
-                msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-                await set_edit_kbd(msg)
-            else:
-                await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-        elif event.message.text == '⚙️ Options':
-            await event.respond('Click on the desired option to select it.', buttons=option_kbd(user['parse_mode'], user['link_preview']))
-        elif event.message.text == 'Get Buttons':
-            await event.respond(json.dumps(b_list, indent=4))
-        elif event.message.text == '📝 Edit Content':
-            user['next'] = 'create_post'
-            database.users.update_one({'_id': user['_id']}, {"$set": user})
-            await event.respond('Enter new content for the post', buttons=Button.clear())
-        elif event.message.text == 'Cancel':
-            database.posts.delete_one({'_id': ObjectId(user['post_id'])})
-            user['post_id'] = None
-            database.users.update_one({'_id': user['_id']}, {"$set": user})
-            await event.respond('''Welcome 🌺
-using this bot you can create cool posts with buttons, markdown text, HTML text, and embedded links.
-then you can send it anywhere you want using inline mode
-if you want to send the post to your channel without inline mode you need to get your own instance of this bot.''', buttons=buttons_main)
-        elif event.message.text == '☑️ Done':
-            me = await bot.get_me()
-            user['post_id_back'] = user['post_id']
-            user['post_id'] = None
-            database.users.update_one({'_id': user['_id']}, {"$set": user})
-            buttons = [
-                [Button.text('📌 Create another post', resize=True), Button.text('🔙', resize=True)]
-            ]
-            await event.respond(f'''☑️ Post has been saved. your post number is: {user['post_id_back']}\nto send it via inline mode use:\n\n`@{me.username} {user['post_id_back']}`''', buttons=buttons)
-            
-    elif event.message.text.startswith('/schedule'):
-        inp = event.message.text.split(' ')
-        if len(inp) != 4:
-            await event.respond('Invalid syntax\nsyntax:\n`/schedule post_id target_chat_id HH:MM`\nHH:MM is in 24 hour format')
-            return
-        data = database.posts.find_one({'_id': ObjectId(inp[1])})
-        if data is None:
-            await event.respond('post not found')
-            return
-        job_data = {
-            'chat_id': event.chat_id,
-            'post_id': inp[1],
-            'target_chat_id': int(inp[2]),
-            'time': inp[3]
-        }
-        result = add_job(job_data, inp[3])
-        await event.respond(f'''schedule created successfully!\nSchedule ID: `{result.inserted_id}`\n\nto stop the schedule:\n`/stop {result.inserted_id}`''', buttons=Button.clear())
-
-    elif event.message.text.startswith('/stop'):
-        inp = event.message.text.split(' ', 1)
-        if len(inp)!= 2:
-            await event.respond('invalid syntax\n\nsyntax: `/stop schedule_id`')
-            return
-        schedule = database.cron.find_one({'_id': ObjectId(inp[1]), 'chat_id': event.chat_id})
-        if schedule is None:
-            await event.respond('schedule not found')
-            return
-        user['next'] = 'stop_schedule'
-        user['stop_schedule'] = inp[1]
-        database.users.update_one({'_id': user['_id']}, {"$set": user})
-        buttons = [
-            [Button.text('Yes', resize=True), Button.text('No', resize=True)]
-        ]
-        await event.respond(f'Are you sure you want to delete schedule {inp[1]} ?', buttons=buttons)
 
     elif user['next'] == 'stop_schedule':
         if event.message.text == 'Yes':
