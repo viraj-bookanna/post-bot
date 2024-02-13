@@ -22,7 +22,7 @@ buttons_main = [
 
 async def wait_until_next_minute():
     now = datetime.now(TIMEZONE)
-    next_minute = now.replace(hour=now.hour, minute=now.minute+1, second=0, microsecond=0)
+    next_minute = now.replace(hour=now.hour, minute=now.minute+1 if now.minute!=59 else 0, second=0, microsecond=0)
     seconds_to_next_minute = (next_minute-now).total_seconds()
     await asyncio.sleep(seconds_to_next_minute)
 def get_jobs_for_current_minute():
@@ -45,6 +45,7 @@ async def execute_job(job):
         media = (await bot.get_messages(data['chat_id'], ids=data['media'])).media
     else:
         media = None
+    database.cron.delete_one(job)
     try:
         await bot.send_message(job['target_chat_id'], data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
     except KeyboardInterrupt as e:
@@ -165,7 +166,7 @@ if you want to send the post to your channel without inline mode you need to get
         elif event.message.text == '⚙️ Options':
             await event.respond('Click on the desired option to select it.', buttons=option_kbd(user['parse_mode'], user['link_preview']))
         elif event.message.text == 'Get Buttons':
-            await event.respond(json.dumps(b_list, indent=4))
+            await event.respond(json.dumps(b_list, indent=4), link_preview=False)
         elif event.message.text == '📝 Edit Content':
             user['next'] = 'create_post'
             database.users.update_one({'_id': user['_id']}, {"$set": user})
@@ -332,6 +333,9 @@ if you want to send the post to your channel without inline mode you need to get
             return
         user['next'] = None
         database.users.update_one({'_id': user['_id']}, {"$set": user})
+
+    else:
+        await event.respond('Unknown command\nplease restart bot with /start or use /help')
 
 @bot.on(events.CallbackQuery(func=lambda e:e.is_private))
 async def handler(event):
