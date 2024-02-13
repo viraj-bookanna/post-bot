@@ -1,6 +1,7 @@
 import os,logging,json,asyncio,pytz,telethon
 from telethon import TelegramClient, events
 from telethon.tl.custom.button import Button
+from telethon.tl.types import MessageEntityUrl
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
@@ -20,6 +21,18 @@ buttons_main = [
     [Button.text('📌 Create post', resize=True), Button.text('📝Edit Post', resize=True), ]
 ]
 
+def find_all_urls(message):
+    ret = list()
+    if message.entities is None:
+        return ret
+    for entity in message.entities:
+        if type(entity) == MessageEntityUrl:
+            url = message.text[entity.offset:entity.offset+entity.length]
+            if url.startswith('http://') or url.startswith('https://'):
+                ret.append(url)
+            else:
+                ret.append('http://'+url)
+    return ret
 async def wait_until_next_minute():
     now = datetime.now(TIMEZONE)
     next_minute = now.replace(hour=now.hour, minute=now.minute+1 if now.minute!=59 else 0, second=0, microsecond=0)
@@ -154,15 +167,18 @@ if you want to send the post to your channel without inline mode you need to get
         data = database.posts.find_one({'_id': ObjectId(user['post_id'])})
         b_list = [] if 'buttons' not in data else data['buttons']
         if event.message.text in ['🔙', '👁‍🗨 Preview']:
-            if 'media' in data:
-                media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
-            else:
-                media = None
-            if event.message.text == '🔙':
-                msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
-                await set_edit_kbd(msg)
-            else:
-                await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+            try:
+                if 'media' in data:
+                    media = (await bot.get_messages(event.chat_id, ids=data['media'])).media
+                else:
+                    media = None
+                if event.message.text == '🔙':
+                    msg = await event.respond(data['text'],  file=media, buttons=inlinefy(b_list, user['post_id']), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+                    await set_edit_kbd(msg)
+                else:
+                    await event.respond(data['text'],  file=media, buttons=urlfy(b_list), parse_mode=user['parse_mode'], link_preview=user['link_preview'])
+            except Exception as e:
+                await event.respond(repr(e))
         elif event.message.text == '⚙️ Options':
             await event.respond('Click on the desired option to select it.', buttons=option_kbd(user['parse_mode'], user['link_preview']))
         elif event.message.text == 'Get Buttons':
@@ -275,15 +291,19 @@ if you want to send the post to your channel without inline mode you need to get
         user['btn_data']['text'] = event.message.text
         user['next'] = 'add_btn_url'
         database.users.update_one({'_id': user['_id']}, {"$set": user})
-        await event.respond("Please send url for button:", buttons=Button.clear())
+        await event.respond("Please send URL for button:", buttons=Button.clear())
     
     elif user['next'] == 'add_btn_url':
+        urls = find_all_urls(event.message)
+        if len(urls)==0:
+            await event.respond('Invalid URL')
+            return
         user['next'] = None
         database.users.update_one({'_id': user['_id']}, {"$set": user})
         data = database.posts.find_one({'_id': ObjectId(user['post_id'])})
         b_list = [] if 'buttons' not in data else data['buttons']
         if len(user['btn_data']['address'])==1:
-            b_list.append([{'text': user['btn_data']['text'], 'url': event.message.text}])
+            b_list.append([{'text': user['btn_data']['text'], 'url': urls[0]}])
         else:
             print(user)
             if type(user['btn_data']['address'][1])==int and 0 <= user['btn_data']['address'][1] < len(b_list[user['btn_data']['address'][0]]):
@@ -394,19 +414,39 @@ async def handler(event):
     if data is None:
         return
     if 'media' in data:
-        media = (await bot.get_messages(data['chat_id'], ids=data['media'])).media
+        msg = (await bot.get_messages(data['chat_id'], ids=data['media']))
+        if msg.photo:
+            await event.answer([
+                event.builder.photo(
+                    msg.media,
+                    text=data['text'],
+                    buttons=urlfy([] if 'buttons' not in data else data['buttons']),
+                    parse_mode=user['parse_mode'],
+                    link_preview=user['link_preview'],
+                )
+            ])
+        else:
+            await event.answer([
+                event.builder.document(
+                    msg.media,
+                    title=f'send post: {event.text}',
+                    text=data['text'],
+                    buttons=urlfy([] if 'buttons' not in data else data['buttons']),
+                    parse_mode=user['parse_mode'],
+                    link_preview=user['link_preview'],
+                )
+            ])
     else:
-        media = None
-    await event.answer([
-        event.builder.article(
-            f'send post: {event.text}',
-            text=data['text'],
-            #file=media,
-            buttons=urlfy([] if 'buttons' not in data else data['buttons']),
-            parse_mode=user['parse_mode'],
-            link_preview=user['link_preview'],
-        )
-    ])
+        await event.answer([
+            event.builder.article(
+                f'send post: {event.text}',
+                text=data['text'],
+                #file=media,
+                buttons=urlfy([] if 'buttons' not in data else data['buttons']),
+                parse_mode=user['parse_mode'],
+                link_preview=user['link_preview'],
+            )
+        ])
 
 # Event handler for new members joining the group
 @bot.on(events.ChatAction(func=lambda event: event.user_joined))
